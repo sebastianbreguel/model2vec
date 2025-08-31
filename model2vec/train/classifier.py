@@ -137,6 +137,8 @@ class StaticModelForClassification(FinetunableStaticModel):
         device: str = "auto",
         X_val: list[str] | None = None,
         y_val: LabelType | None = None,
+        use_class_weights: bool = True, 
+        class_weights: torch.Tensor | None = None
     ) -> StaticModelForClassification:
         """
         Fit a model.
@@ -204,8 +206,19 @@ class StaticModelForClassification(FinetunableStaticModel):
         logger.info("Preparing validation dataset.")
         val_dataset = self._prepare_dataset(validation_texts, validation_labels)
 
-        c = _ClassifierLightningModule(self, learning_rate=learning_rate)
+        computed_weights = None
+        if use_class_weights or class_weights is not None:
+            if class_weights is not None:
+                computed_weights = class_weights
+                logger.info(f"Using provided class weights: {computed_weights}")
+            else:
+                computed_weights = self._calculate_class_weights(y)
+                logger.info(f"Calculated class weights: {computed_weights}")
+        else:
+            logger.info("No class weights provided. Using default loss function.")
 
+        c = _ClassifierLightningModule(self, learning_rate=learning_rate, class_weights=class_weights)
+        
         n_train_batches = len(train_dataset) // batch_size
         callbacks: list[Callback] = []
         if early_stopping_patience is not None:
@@ -373,16 +386,27 @@ class StaticModelForClassification(FinetunableStaticModel):
 
 
 class _ClassifierLightningModule(pl.LightningModule):
-    def __init__(self, model: StaticModelForClassification, learning_rate: float) -> None:
+    def __init__(self, model: StaticModelForClassification, learning_rate: float, class_weights: torch.Tensor | None = None) -> None:
         """Initialize the LightningModule."""
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
-        self.loss_function = nn.CrossEntropyLoss() if not model.multilabel else nn.BCEWithLogitsLoss()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self._setup_loss_function(class_weights)
+                
+    def _setup_loss_function(self, class_weights: torch.Tensor | None) -> None:
+        """Setup the loss function."""
+        if self.model.multilabel:
+            if class_weights is not None:
+                self.loss_function = nn.BCEWithLogitsLoss(pos_weight=class_weights)
+            else:
+                self.loss_function = nn.BCEWithLogitsLoss()
+        else:
+            if class_weights is not None:
+                self.loss_function = nn.CrossEntropyLoss(weight=class_weights)
+            else:
+                self.loss_function = nn.CrossEntropyLoss()
         """Simple forward pass."""
-        return self.model(x)
+        return 
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Training step using cross-entropy loss for single-label and binary cross-entropy for multilabel training."""
